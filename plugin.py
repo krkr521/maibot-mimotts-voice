@@ -1,12 +1,16 @@
 """AI Voice Service Plugin for MaiBot."""
 
-import asyncio
 import base64
 from pathlib import Path
 from typing import Any, Optional
 
 from maibot_sdk import API, CONFIG_RELOAD_SCOPE_SELF, MaiBotPlugin, Tool, Field, PluginConfigBase
 from maibot_sdk.types import ActivationType, ToolParameterInfo, ToolParamType
+
+if __package__:
+    from .usage_accounting import record_usage
+else:
+    from usage_accounting import record_usage
 
 try:
     from .tts_service import MiMoTTSService
@@ -55,11 +59,17 @@ class AIVoicePlugin(MaiBotPlugin):
         api_key = self.config.voice.mimo_api_key
         if not api_key:
             self.ctx.logger.warning("MiMo API Key not configured")
-        self.tts_service = MiMoTTSService(api_key=api_key, api_base_url=self.config.voice.api_base_url, logger=self.ctx.logger)
+        self.tts_service = MiMoTTSService(
+            api_key=api_key, api_base_url=self.config.voice.api_base_url, logger=self.ctx.logger,
+            usage_callback=self._record_model_usage,
+        )
         self.default_voice = self.config.voice.default_voice or self.config.voice.clone_voice
         await self._load_voices()
         self.ctx.logger.info("AI Voice Plugin loaded: mode=%s, default_voice=%s, voices=%s",
             self.config.voice.voice_mode, self.default_voice, list(self.voices.keys()))
+
+    async def _record_model_usage(self, **details: Any) -> dict:
+        return await record_usage(self.ctx, **details)
 
     def _ensure_config_exists(self) -> None:
         """如果用户目录下不存在 config.toml，则从 config.example.toml 复制生成。不会覆盖用户已有配置。"""
@@ -163,21 +173,10 @@ class AIVoicePlugin(MaiBotPlugin):
         """
         self.ctx.logger.info("Sending voice to stream=%s, b64_len=%d", stream_id, len(audio_b64))
 
-        b64_url = f"base64://{audio_b64}"
-        # 原始引用可以释放（如果调用方已 del 则无额外效果，但作为安全措施）
-        audio_b64 = ""
-
-        # Method 1: record type with base64 (NapCat standard for voice)
         try:
-            await self.ctx.send.custom("record", {"file": b64_url}, stream_id)
-            self.ctx.logger.info("Sent via record+base64")
-            return True
-        except Exception as e:
-            self.ctx.logger.warning("record+base64 failed: %s", e)
-
-        # Method 2: voice type with base64
-        try:
-            await self.ctx.send.custom("voice", {"file": b64_url}, stream_id)
+            sent = bool(await self.ctx.send.custom("voice", audio_b64, stream_id))
+            if not sent:
+                return False
             self.ctx.logger.info("Sent via voice+base64")
             return True
         except Exception as e:
@@ -262,7 +261,9 @@ class AIVoicePlugin(MaiBotPlugin):
                 # 立即从 result 中移除大字段，避免双重内存占用
                 result.pop("audio_base64", None)
 
-                await self._send_voice(audio_b64, stream_id)
+                if not await self._send_voice(audio_b64, stream_id):
+                    return {"success": False, "error": "语音已合成，但发送失败；不要重复合成扣费。"}
+                result["user_notified"] = True
                 audio_b64 = ""
             elif audio_b64:
                 # 不需要发送时也清理
@@ -274,9 +275,13 @@ class AIVoicePlugin(MaiBotPlugin):
             return {"success": False, "error": str(e)}
 
     @Tool(
-        "send_voice_reply",
-        brief_description="使用语音回复用户，可选传入风格指令控制语气情绪",
+        "send_taffy_voice",
+        background_task=True,
+        background_label="塔菲声线合成",
+        timeout_ms=90000,
+        brief_description="使用塔菲/taffy声线回复用户；只有用户明确要求塔菲声线、taffy声线或群友要求这个声线时调用。",
         detailed_description=(
+            "使用塔菲/taffy声线进行语音回复。仅当用户明确说要塔菲声线、taffy声线、这个声线，或群友要求用塔菲声线时调用；普通语音不要用这个工具。\n"
             "使用语音进行回复。当用户要求语音、用户发送了语音消息、或你认为当前场景适合语音回复时调用。\n"
             "必填参数：reply_text（回复文本）、msg_id（当前消息ID）。\n"
             "可选参数：style_instruction（语音风格指令），不传则使用默认音色自然朗读，需要更生动的表达时可填写。\n\n"
@@ -319,7 +324,7 @@ class AIVoicePlugin(MaiBotPlugin):
             ),
         ],
     )
-    async def send_voice_reply(self, reply_text: str, msg_id: str = "", style_instruction: str = "", **kwargs: Any) -> dict[str, Any]:
+    async def send_taffy_voice(self, reply_text: str, msg_id: str = "", style_instruction: str = "", **kwargs: Any) -> dict[str, Any]:
         # Find the correct stream_id
         stream_id = await self._find_stream_id(kwargs)
         if not stream_id:
@@ -328,17 +333,17 @@ class AIVoicePlugin(MaiBotPlugin):
 
         self.ctx.logger.info("Using stream_id=%s for voice reply, text_len=%d", stream_id, len(reply_text))
 
-        # Always use the configured default voice
-        asyncio.create_task(self._async_voice_reply(reply_text, style_instruction, stream_id, ""))
-        return {"success": True, "method": "voice", "error": ""}
-
-    async def _async_voice_reply(self, text: str, style_instruction: str, stream_id: str, voice_name: str) -> None:
-        """Send voice reply asynchronously."""
-        try:
-            result = await self.voice_clone_tts(text=text, style_instruction=style_instruction, stream_id=stream_id, voice_name=voice_name)
-            self.ctx.logger.info("Async voice reply result: %s", result.get("success"))
-        except Exception as e:
-            self.ctx.logger.error("Async voice reply failed: %s", e)
+        # Always use the dedicated Taffy clone voice.
+        # Host 根据组件 metadata 在后台执行；这里返回真实合成/发送结果，不能抢先报成功。
+        result = await self.voice_clone_tts(
+            text=reply_text, style_instruction=style_instruction, stream_id=stream_id, voice_name="taffy",
+        )
+        result["method"] = "voice"
+        if result.get("success"):
+            result["content"] = "塔菲语音已发送，无需再发送文字或重复合成。"
+        else:
+            result["content"] = "塔菲语音未能交付：" + str(result.get("error") or "合成或发送失败")
+        return result
 
 
 def create_plugin() -> AIVoicePlugin:

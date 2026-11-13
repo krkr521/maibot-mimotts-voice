@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "id": "Emilia-awa.maibot-mimotts-voice",
   "name": "MiMo TTS Voice Clone",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "MiMo TTS Voice Clone Plugin for MaiBot - AI语音回复插件，支持自定义音色克隆和风格控制",
   "author": {
     "name": "Emilia-awa",
@@ -10,7 +10,7 @@
   },
   "license": "MIT",
   "urls": {
-    "repository": "https://github.com/Emilia-awa/maibot-mimotts-voice",
+    "repository": "https://github.com/krkr521/maibot-mimotts-voice",
     "homepage": "https://github.com/Emilia-awa/maibot-mimotts-voice"
   },
   "host_application": {
@@ -27,10 +27,13 @@
     "send.custom",
     "send.record",
     "message.get_by_id",
-    "chat.get_all_streams"
+    "chat.get_all_streams",
+    "database.save"
   ],
   "i18n": {
     "default_locale": "zh-CN",
-    "supported_locales": ["zh-CN"]
+    "supported_locales": [
+      "zh-CN"
+    ]
   }
 }

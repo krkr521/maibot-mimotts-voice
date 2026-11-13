@@ -1,3 +1,5 @@
+> **定制 fork**：本仓库基于 [Emilia-awa/maibot-mimotts-voice](https://github.com/Emilia-awa/maibot-mimotts-voice)。定制代码位于 `local/custom`，功能差异和安装限制见 [本地改动说明](LOCAL_CHANGES.md)。原作者及许可证保留。
+
 # MiMo TTS Voice Plugin for MaiBot
 
 基于小米 MiMo-V2.5-TTS 的 AI 语音服务插件，为 MaiBot 提供智能语音回复功能。支持**预置音色**和**音色复刻**两种模式。

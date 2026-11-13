@@ -2,6 +2,7 @@
 
 import gc
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any, Optional
 
 import aiohttp
@@ -14,11 +15,15 @@ class MiMoTTSService:
     MODEL_PRESET = "mimo-v2.5-tts"
     MODEL_CLONE = "mimo-v2.5-tts-voiceclone"
 
-    def __init__(self, api_key: str, api_base_url: str = "", logger: Optional[logging.Logger] = None):
+    def __init__(
+        self, api_key: str, api_base_url: str = "", logger: Optional[logging.Logger] = None,
+        usage_callback: Callable[..., Awaitable[Any]] | None = None,
+    ):
         self.api_key = api_key.strip() if api_key else ""
         self.api_base_url = api_base_url.strip() if api_base_url else self.DEFAULT_API_BASE_URL
         self.logger = logger or logging.getLogger(__name__)
         self._session: Optional[aiohttp.ClientSession] = None
+        self.usage_callback = usage_callback
 
     def update_api_key(self, api_key: str) -> None:
         self.api_key = api_key.strip() if api_key else ""
@@ -139,6 +144,16 @@ class MiMoTTSService:
                     return {"success": False, "error": f"API failed: {response.status} - {error_text[:200]}"}
 
                 result = await response.json()
+                # 保留上游真实 usage；不能把输入字符或音频长度伪造为 token。
+                if self.usage_callback is not None:
+                    try:
+                        await self.usage_callback(
+                            provider="mimo", model=payload["model"], request_type="plugin_tts",
+                            usage=result.get("usage"),
+                            units={"characters": len(payload["messages"][-1]["content"])},
+                        )
+                    except Exception:
+                        self.logger.exception("MiMo TTS 用量上报失败，继续交付已合成音频")
                 choices = result.get("choices", [])
                 if not choices:
                     return {"success": False, "error": "No result"}
